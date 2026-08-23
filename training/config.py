@@ -14,12 +14,13 @@ class ModelConfig:
     """Base model selection and loading options."""
 
     # "mistralai/Mistral-7B-v0.1" or "meta-llama/Llama-3.2-3B"
-    model_name: str = "meta-llama/Llama-3.2-3B"
+    model_name: str = "Qwen/Qwen2.5-Coder-3B-Instruct"
 
     # 4-bit NF4 quantization via bitsandbytes
     load_in_4bit: bool = True
     bnb_4bit_quant_type: str = "nf4"
-    bnb_4bit_compute_dtype: str = "bfloat16"  # computation dtype for 4-bit layers
+    bnb_4bit_compute_dtype: str = "float16" # For kaggle
+    # bnb_4bit_compute_dtype: str = "bfloat16"  # computation dtype for 4-bit layers
     bnb_4bit_use_double_quant: bool = True     # nested quantization for memory savings
 
     max_seq_length: int = 512
@@ -36,7 +37,12 @@ class LoRAConfig:
 
     # Only attention projection layers are adapted — keeps adapter small
     target_modules: List[str] = field(
-        default_factory=lambda: ["q_proj", "v_proj"]
+        default_factory=lambda: [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+        ]
     )
 
     task_type: str = "CAUSAL_LM"
