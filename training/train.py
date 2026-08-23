@@ -62,24 +62,81 @@ def make_bnb_config(cfg: ModelConfig) -> BitsAndBytesConfig:
 # ---------------------------------------------------------------------------
 
 def load_model_and_tokenizer(cfg: ModelConfig):
-    """Load the base model in 4-bit + the matching tokenizer."""
+    """Load Qwen in 4-bit and initialize its tokenizer."""
     bnb_config = make_bnb_config(cfg)
 
     print(f"Loading model: {cfg.model_name}")
+
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
         quantization_config=bnb_config,
         device_map="auto",
         trust_remote_code=True,
     )
-    model.config.use_cache = False          # required for gradient checkpointing
-    model.config.pretraining_tp = 1         # disable tensor parallelism for training
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, trust_remote_code=True)
-    tokenizer.pad_token = tokenizer.eos_token
+    model.config.use_cache = False
+
+    # Some models expose this field; harmless if already present.
+    if hasattr(model.config, "pretraining_tp"):
+        model.config.pretraining_tp = 1
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        cfg.model_name,
+        trust_remote_code=True,
+    )
+
+    # Qwen has an EOS token but may not have a dedicated PAD token.
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
     tokenizer.padding_side = "right"       # pad on right for causal LM
 
     return model, tokenizer
+
+
+# ---------------------------------------------------------------------------
+# Convert a sample into a format Qwen understands
+# ---------------------------------------------------------------------------
+
+def format_qwen_example(example, tokenizer):
+    """Convert Spider's schema/question/SQL example into Qwen's chat format."""
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You generate valid SQLite SQL from database schemas "
+                "and natural-language questions."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"### Schema:\n"
+                f"{example['schema']}\n\n"
+                f"### Question:\n"
+                f"{example['question']}"
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": example["sql"],
+        },
+    ]
+
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+    return {
+        "text": text,
+        "sql": example["sql"],
+        "question": example["question"],
+        "schema": example["schema"],
+        "db_id": example["db_id"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -108,13 +165,14 @@ def attach_lora(model, lora_cfg: LoRAConfig):
 # Dataset loading
 # ---------------------------------------------------------------------------
 
-def load_dataset(data_cfg: DataConfig) -> DatasetDict:
+def load_dataset(data_cfg: DataConfig, tokenizer) -> DatasetDict:
     spider_root = Path(data_cfg.spider_path)
     train_file = spider_root / data_cfg.train_file
 
     if train_file.exists():
         print(f"Using local Spider dataset at {spider_root}")
-        return load_spider_dataset(
+
+        dataset = load_spider_dataset(
             spider_path=str(spider_root),
             train_file=data_cfg.train_file,
             dev_file=data_cfg.dev_file,
@@ -122,13 +180,25 @@ def load_dataset(data_cfg: DataConfig) -> DatasetDict:
             max_train_samples=data_cfg.max_train_samples,
             max_eval_samples=data_cfg.max_eval_samples,
         )
+    else:
+        print(
+            "Local Spider not found — downloading from "
+            f"HuggingFace Hub ({data_cfg.dataset_name})"
+        )
 
-    print(f"Local Spider not found — downloading from HuggingFace Hub ({data_cfg.dataset_name})")
-    return load_from_hub(
-        dataset_name=data_cfg.dataset_name,
-        max_train_samples=data_cfg.max_train_samples,
-        max_eval_samples=data_cfg.max_eval_samples,
+        dataset = load_from_hub(
+            dataset_name=data_cfg.dataset_name,
+            max_train_samples=data_cfg.max_train_samples,
+            max_eval_samples=data_cfg.max_eval_samples,
+        )
+
+    # Convert both splits to Qwen chat format.
+    dataset = dataset.map(
+        lambda example: format_qwen_example(example, tokenizer),
+        desc="Formatting examples with Qwen chat template",
     )
+
+    return dataset
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +213,7 @@ def train(cfg: Config):
     model, peft_config = attach_lora(model, cfg.lora)
 
     # 3. Dataset
-    dataset = load_dataset(cfg.data)
+    dataset = load_dataset(cfg.data, tokenizer)
 
     # 4. TrainingArguments
     training_args = TrainingArguments(
@@ -172,8 +242,10 @@ def train(cfg: Config):
         dataloader_num_workers=4,
     )
 
-    # Response-only loss: only back-prop through the SQL portion, not the prompt
-    response_template = "\n### SQL:\n"
+    # Only train on the assistant/SQL portion.
+    # Qwen chat template generates: <|im_start|>assistant\n
+    response_template = "<|im_start|>assistant\n"
+
     collator = DataCollatorForCompletionOnlyLM(
         response_template=response_template,
         tokenizer=tokenizer,
@@ -210,17 +282,22 @@ def train(cfg: Config):
 
 def merge_and_save(adapter_path: str, output_path: str):
     """
-    Merge LoRA weights back into the base model and save a full model.
-    Useful for faster inference (avoids PEFT overhead at serving time).
+    Merge LoRA weights back into the base model.
     """
+
     from peft import AutoPeftModelForCausalLM
 
     print(f"Merging adapter from {adapter_path} …")
+
     model = AutoPeftModelForCausalLM.from_pretrained(
-        adapter_path, device_map="auto", torch_dtype=torch.bfloat16
+        adapter_path,
+        device_map="auto",
+        torch_dtype=torch.float16,
     )
+
     merged = model.merge_and_unload()
     merged.save_pretrained(output_path)
+
     print(f"Merged model saved to: {output_path}")
 
 
@@ -245,6 +322,8 @@ def parse_args():
         action="store_true",
         help="After training, merge adapter into base model and save.",
     )
+    parser.add_argument("--max-train-samples", default=None, help="Max training samples.")
+    parser.add_argument("--max-eval-samples", default=500, help="Max evaluation samples.")
     return parser.parse_args()
 
 
@@ -263,6 +342,10 @@ if __name__ == "__main__":
         cfg.training.output_dir = args.output_dir
     if args.spider_path:
         cfg.data.spider_path = args.spider_path
+    if args.max_train_samples:
+        cfg.data.max_train_samples = args.max_train_samples
+    if args.max_eval_samples:
+        cfg.data.max_eval_samples = args.max_eval_samples
 
     trainer, adapter_path = train(cfg)
 
