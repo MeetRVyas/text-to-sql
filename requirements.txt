@@ -1,0 +1,24 @@
+# Core ML
+torch>=2.1.0
+transformers>=4.40.0
+peft>=0.10.0
+bitsandbytes>=0.43.0
+accelerate>=0.29.0
+datasets>=2.19.0
+trl>=0.8.6
+
+# API serving
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.7.0
+
+# Data & evaluation
+pandas>=2.2.0
+numpy>=1.26.0
+sqlparse>=0.5.0
+tqdm>=4.66.0
+
+# Utilities
+huggingface-hub>=0.22.0
+scipy>=1.13.0
+scikit-learn>=1.4.0
