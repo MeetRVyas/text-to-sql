@@ -19,7 +19,6 @@ Usage
 """
 
 import argparse
-import os
 from pathlib import Path
 
 import torch
@@ -29,12 +28,12 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    TrainingArguments,
 )
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+from trl import SFTConfig, SFTTrainer
 
-from training.config import Config, DataConfig, LoRAConfig, ModelConfig, TrainingConfig
-from data.prepare_dataset import load_spider_dataset, load_from_hub
+from training.config import Config, DataConfig, LoRAConfig, ModelConfig
+from data.prepare_dataset import load_spider_dataset
+from data.prompt_format import build_messages
 
 
 # ---------------------------------------------------------------------------
@@ -98,45 +97,18 @@ def load_model_and_tokenizer(cfg: ModelConfig):
 # Convert a sample into a format Qwen understands
 # ---------------------------------------------------------------------------
 
-def format_qwen_example(example, tokenizer):
-    """Convert Spider's schema/question/SQL example into Qwen's chat format."""
+def format_qwen_example(example):
+    """
+    Convert a Spider (schema, question, sql) record into TRL's conversational
+    `messages` format (data/prompt_format.py — shared with inference).
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You generate valid SQLite SQL from database schemas "
-                "and natural-language questions."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"### Schema:\n"
-                f"{example['schema']}\n\n"
-                f"### Question:\n"
-                f"{example['question']}"
-            ),
-        },
-        {
-            "role": "assistant",
-            "content": example["sql"],
-        },
-    ]
-
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=False,
-    )
-
-    return {
-        "text": text,
-        "sql": example["sql"],
-        "question": example["question"],
-        "schema": example["schema"],
-        "db_id": example["db_id"],
-    }
+    Note this no longer renders the chat template itself: SFTTrainer applies
+    the model's own chat template internally and, with
+    `assistant_only_loss=True`, masks the loss to the assistant turn using
+    the tokenizer's own token boundaries rather than a hand-matched string
+    like "<|im_start|>assistant\n".
+    """
+    return {"messages": build_messages(example["schema"], example["question"], example["sql"])}
 
 
 # ---------------------------------------------------------------------------
@@ -165,37 +137,37 @@ def attach_lora(model, lora_cfg: LoRAConfig):
 # Dataset loading
 # ---------------------------------------------------------------------------
 
-def load_dataset(data_cfg: DataConfig, tokenizer) -> DatasetDict:
+def load_dataset(data_cfg: DataConfig) -> DatasetDict:
     spider_root = Path(data_cfg.spider_path)
     train_file = spider_root / data_cfg.train_file
 
-    if train_file.exists():
-        print(f"Using local Spider dataset at {spider_root}")
-
-        dataset = load_spider_dataset(
-            spider_path=str(spider_root),
-            train_file=data_cfg.train_file,
-            dev_file=data_cfg.dev_file,
-            tables_file=data_cfg.tables_file,
-            max_train_samples=data_cfg.max_train_samples,
-            max_eval_samples=data_cfg.max_eval_samples,
-        )
-    else:
-        print(
-            "Local Spider not found — downloading from "
-            f"HuggingFace Hub ({data_cfg.dataset_name})"
+    if not train_file.exists():
+        raise FileNotFoundError(
+            f"Spider training file not found: {train_file}\n"
+            f"Run `bash scripts/download_spider.sh` first (or point "
+            f"--spider-path at an existing local Spider download). "
+            f"This project trains against the local Spider database files "
+            f"for real schema context — there is no network-download "
+            f"fallback, since a dataset without schema context would "
+            f"silently train the model on empty schemas."
         )
 
-        dataset = load_from_hub(
-            dataset_name=data_cfg.dataset_name,
-            max_train_samples=data_cfg.max_train_samples,
-            max_eval_samples=data_cfg.max_eval_samples,
-        )
+    print(f"Using local Spider dataset at {spider_root}")
 
-    # Convert both splits to Qwen chat format.
+    dataset = load_spider_dataset(
+        spider_path=str(spider_root),
+        train_file=data_cfg.train_file,
+        dev_file=data_cfg.dev_file,
+        tables_file=data_cfg.tables_file,
+        max_train_samples=data_cfg.max_train_samples,
+        max_eval_samples=data_cfg.max_eval_samples,
+    )
+
+    # Convert both splits to conversational `messages` — SFTTrainer applies
+    # the chat template and (assistant_only_loss=True) the loss mask itself.
     dataset = dataset.map(
-        lambda example: format_qwen_example(example, tokenizer),
-        desc="Formatting examples with Qwen chat template",
+        format_qwen_example,
+        desc="Formatting examples as chat messages",
     )
 
     return dataset
@@ -213,10 +185,16 @@ def train(cfg: Config):
     model, peft_config = attach_lora(model, cfg.lora)
 
     # 3. Dataset
-    dataset = load_dataset(cfg.data, tokenizer)
+    dataset = load_dataset(cfg.data)
 
-    # 4. TrainingArguments
-    training_args = TrainingArguments(
+    # 4. SFTConfig
+    # trl 1.10 moved sequence-length / dataset-format / loss-masking settings
+    # off of plain TrainingArguments and onto SFTConfig. assistant_only_loss
+    # is trl's native replacement for the old hand-rolled
+    # DataCollatorForCompletionOnlyLM + response_template string matching:
+    # it masks the loss to the assistant turn using the tokenizer's own
+    # chat-template structure instead of a fragile literal string match.
+    training_args = SFTConfig(
         output_dir=cfg.training.output_dir,
         num_train_epochs=cfg.training.num_train_epochs,
         per_device_train_batch_size=cfg.training.per_device_train_batch_size,
@@ -240,15 +218,9 @@ def train(cfg: Config):
         seed=cfg.training.seed,
         gradient_checkpointing=True,
         dataloader_num_workers=4,
-    )
-
-    # Only train on the assistant/SQL portion.
-    # Qwen chat template generates: <|im_start|>assistant\n
-    response_template = "<|im_start|>assistant\n"
-
-    collator = DataCollatorForCompletionOnlyLM(
-        response_template=response_template,
-        tokenizer=tokenizer,
+        max_length=cfg.model.max_length,
+        assistant_only_loss=True,
+        packing=False,  # packing + assistant_only_loss is not a supported combination
     )
 
     # 5. SFTTrainer
@@ -257,11 +229,8 @@ def train(cfg: Config):
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         peft_config=peft_config,
-        data_collator=collator,
-        dataset_text_field="text",
-        max_seq_length=cfg.model.max_seq_length,
     )
 
     print("\n=== Starting QLoRA fine-tuning ===")
@@ -292,7 +261,7 @@ def merge_and_save(adapter_path: str, output_path: str):
     model = AutoPeftModelForCausalLM.from_pretrained(
         adapter_path,
         device_map="auto",
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
     )
 
     merged = model.merge_and_unload()
@@ -322,8 +291,8 @@ def parse_args():
         action="store_true",
         help="After training, merge adapter into base model and save.",
     )
-    parser.add_argument("--max-train-samples", default=None, help="Max training samples.")
-    parser.add_argument("--max-eval-samples", default=500, help="Max evaluation samples.")
+    parser.add_argument("--max-train-samples", type=int, default=None, help="Max training samples.")
+    parser.add_argument("--max-eval-samples", type=int, default=500, help="Max evaluation samples.")
     return parser.parse_args()
 
 

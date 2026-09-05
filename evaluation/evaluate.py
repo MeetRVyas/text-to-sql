@@ -4,23 +4,22 @@ evaluation/evaluate.py
 Evaluates **both** the base model and the fine-tuned model on the Spider dev set
 and prints a side-by-side comparison table showing:
 
-    Model             | Exec Accuracy | Exact Match | Errors
-    ──────────────────┼───────────────┼─────────────┼────────
-    Base (Llama-3.2)  |    xx.x %     |   xx.x %    |  nn
-    Fine-tuned (LoRA) |    xx.x %     |   xx.x %    |  nn
-    Delta             |   +xx.x %     |  +xx.x %    |
+    Model               | Exec Accuracy | Exact Match | Errors
+    ────────────────────┼───────────────┼─────────────┼────────
+    Base (Qwen2.5-Coder) |    xx.x %     |   xx.x %    |  nn
+    Fine-tuned (LoRA)    |    xx.x %     |   xx.x %    |  nn
+    Delta                |   +xx.x %     |  +xx.x %    |
 
 Usage
 -----
     python -m evaluation.evaluate \
-        --base-model meta-llama/Llama-3.2-3B \
+        --base-model Qwen/Qwen2.5-Coder-3B-Instruct \
         --adapter-path checkpoints/qlora-text2sql/final-adapter \
         --spider-path data/spider \
         --n-examples 200
 """
 
 import argparse
-import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -30,8 +29,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 from api.prompt_builder import build_inference_prompt, extract_sql_from_output
 from data.prepare_dataset import load_spider_dataset
-from data.schema_extractor import get_schema, load_spider_tables
 from evaluation.metrics import compute_metrics
+from training.config import ModelConfig
+from training.train import make_bnb_config
 
 
 # ---------------------------------------------------------------------------
@@ -39,18 +39,25 @@ from evaluation.metrics import compute_metrics
 # ---------------------------------------------------------------------------
 
 def load_generator(model_path: str, is_adapter: bool = False, device: str = "auto"):
-    """Return a text-generation pipeline for the given model or adapter."""
+    """
+    Return a text-generation pipeline for the given model or adapter.
+
+    Loads in 4-bit (same BitsAndBytesConfig as training/train.py) so eval
+    conditions match training conditions, and so a 7B comparison model
+    still fits on a single T4.
+    """
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    bnb_config = make_bnb_config(ModelConfig())
 
     if is_adapter:
         from peft import AutoPeftModelForCausalLM
         model = AutoPeftModelForCausalLM.from_pretrained(
-            model_path, device_map=device, torch_dtype=dtype
+            model_path, device_map=device, quantization_config=bnb_config, dtype=dtype
         )
         tokenizer = AutoTokenizer.from_pretrained(model_path)
     else:
         model = AutoModelForCausalLM.from_pretrained(
-            model_path, device_map=device, torch_dtype=dtype
+            model_path, device_map=device, quantization_config=bnb_config, dtype=dtype
         )
         tokenizer = AutoTokenizer.from_pretrained(model_path)
 
@@ -83,9 +90,10 @@ def run_inference(
     Each example dict must have keys: schema, question.
     """
     predictions: List[str] = []
+    tokenizer = generator.tokenizer
 
     for ex in tqdm(examples, desc=f"Generating [{label}]"):
-        prompt = build_inference_prompt(schema=ex["schema"], question=ex["question"])
+        prompt = build_inference_prompt(schema=ex["schema"], question=ex["question"], tokenizer=tokenizer)
         try:
             output = generator(prompt)
             full_text = output[0]["generated_text"]
@@ -105,7 +113,6 @@ def run_inference(
 
 def print_comparison(base_metrics: dict, ft_metrics: dict, base_label: str, ft_label: str):
     col_w = max(len(base_label), len(ft_label), 20)
-    sep = "─" * (col_w + 2)
 
     header = f"{'Model':<{col_w}}  {'Exec Acc':>10}  {'Exact Match':>12}  {'Errors':>7}"
     rule = f"{'─'*col_w}  {'─'*10}  {'─'*12}  {'─'*7}"
@@ -159,7 +166,6 @@ def evaluate(
     device: str = "auto",
 ):
     root = Path(spider_path)
-    tables_json = str(root / "tables.json")
     db_dir = str(root / "database")
 
     # Load dataset (eval split only)
@@ -172,7 +178,6 @@ def evaluate(
     eval_examples = [dict(ex) for ex in ds["validation"]]
 
     # Resolve db paths for metrics
-    spider_index = load_spider_tables(tables_json)
     db_paths: List[str] = []
     valid_examples: List[dict] = []
     gold_sqls: List[str] = []

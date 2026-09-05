@@ -4,17 +4,17 @@
 # Convenience wrapper for launching QLoRA fine-tuning.
 #
 # Adjust MODEL, EPOCHS, and BATCH_SIZE for your GPU.
-# Tested on: RTX 3090 (24 GB) with Llama-3.2-3B @ batch=4, grad_accum=4.
+# Tested on: Kaggle T4 (16 GB) with Qwen2.5-Coder-3B-Instruct @ batch=4, grad_accum=4.
 #
 # Usage:
-#   bash scripts/run_training.sh                      # default (Llama 3B)
-#   bash scripts/run_training.sh --model mistral7b    # Mistral 7B
+#   bash scripts/run_training.sh                      # default (Qwen2.5-Coder-3B-Instruct)
+#   bash scripts/run_training.sh --model mistral7b    # Mistral 7B (comparison run)
 #   bash scripts/run_training.sh --merge              # merge adapter after training
 
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-MODEL="meta-llama/Llama-3.2-3B"
+MODEL="Qwen/Qwen2.5-Coder-3B-Instruct"
 EPOCHS=3
 BATCH_SIZE=4
 OUTPUT_DIR="checkpoints/qlora-text2sql"
@@ -26,8 +26,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --model)
             case "$2" in
-                llama3b)   MODEL="meta-llama/Llama-3.2-3B" ;;
-                mistral7b) MODEL="mistralai/Mistral-7B-v0.1" ;;
+                qwen3b|qwen)   MODEL="Qwen/Qwen2.5-Coder-3B-Instruct" ;;
+                llama3b|llama)   MODEL="meta-llama/Llama-3.2-3B" ;;
+                mistral7b|mistral) MODEL="mistralai/Mistral-7B-v0.1" ;;
                 *)         MODEL="$2" ;;
             esac
             shift 2 ;;

@@ -19,7 +19,7 @@ Implements the two evaluation metrics from the Spider benchmark:
 import re
 import sqlite3
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------

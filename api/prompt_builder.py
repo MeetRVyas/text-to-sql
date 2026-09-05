@@ -3,51 +3,52 @@ api/prompt_builder.py
 ---------------------
 Assembles the structured prompt fed to the fine-tuned model at inference time.
 
-The format is identical to the training format (minus the gold SQL suffix),
-so the model recognises the schema-injection convention it learned during
-fine-tuning and completes with a valid SQL statement.
+Uses the same chat messages (data/prompt_format.build_messages) and the
+same tokenizer chat template that training renders the model's input with.
+The model was fine-tuned on chat-formatted turns via
+`tokenizer.apply_chat_template(...)` — sending it a differently-shaped
+prompt at inference time (e.g. a flat, non-chat string) is a format the
+model never saw during training and degrades generation quality. Routing
+both training and inference through the same `build_messages()` +
+`apply_chat_template()` call keeps them in sync by construction.
 """
 
-from typing import Optional
+from typing import Any
+
+from data.prompt_format import build_messages
 
 
-# ---------------------------------------------------------------------------
-# Template (must match training/prepare_dataset.py PROMPT_TEMPLATE exactly)
-# ---------------------------------------------------------------------------
-
-INFERENCE_TEMPLATE = """\
-### Schema:
-{schema}
-
-### Question:
-{question}
-
-### SQL:
-"""
-
-
-def build_inference_prompt(schema: str, question: str) -> str:
+def build_inference_prompt(schema: str, question: str, tokenizer: Any) -> str:
     """
     Build a prompt for inference (no gold SQL — the model completes it).
 
     Args:
-        schema:   Schema string produced by schema_extractor.get_schema().
-                  E.g.  "concerts(concert_id, theme, stadium_id)\n
-                          stadiums(stadium_id, name, location)"
-        question: Natural language question.
-                  E.g.  "How many concerts are there?"
+        schema:    Schema string produced by schema_extractor.get_schema().
+                   E.g.  "concerts(concert_id, theme, stadium_id)\n
+                           stadiums(stadium_id, name, location)"
+        question:  Natural language question.
+                   E.g.  "How many concerts are there?"
+        tokenizer: The model's tokenizer (must expose apply_chat_template —
+                   this is the exact tokenizer/chat template training used).
 
     Returns:
-        Formatted prompt string ready to be tokenised.
+        Formatted prompt string ready to be tokenised, ending with the
+        chat template's generation prompt (e.g. Qwen's
+        "<|im_start|>assistant\n") so the model continues as the assistant.
     """
-    if not schema.strip():
+    schema = schema.strip()
+    question = question.strip()
+
+    if not schema:
         raise ValueError("schema must not be empty — the model needs it to be schema-aware.")
-    if not question.strip():
+    if not question:
         raise ValueError("question must not be empty.")
 
-    return INFERENCE_TEMPLATE.format(
-        schema=schema.strip(),
-        question=question.strip(),
+    messages = build_messages(schema, question)
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
     )
 
 
@@ -67,9 +68,13 @@ def extract_sql_from_output(full_output: str, prompt: str) -> str:
     if full_output.startswith(prompt):
         sql = full_output[len(prompt):]
     else:
-        # Fallback: look for the ### SQL: marker
-        marker = "### SQL:"
-        idx = full_output.rfind(marker)
+        # Fallback: some generation backends normalise whitespace and don't
+        # echo the prompt byte-for-byte. The chat template's own generation
+        # marker (e.g. Qwen's "<|im_start|>assistant\n") is always the last
+        # line of `prompt` itself, so using that as the marker stays valid
+        # regardless of which chat template the tokenizer uses.
+        marker = prompt.strip().splitlines()[-1] if prompt.strip() else ""
+        idx = full_output.rfind(marker) if marker else -1
         if idx != -1:
             sql = full_output[idx + len(marker):]
         else:

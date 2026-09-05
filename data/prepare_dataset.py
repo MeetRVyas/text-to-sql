@@ -1,19 +1,17 @@
 """
 data/prepare_dataset.py
 -----------------------
-Loads the Spider dataset and converts every (question, SQL) pair into the
-structured prompt format used during both training and inference:
+Loads the Spider dataset and resolves every (question, SQL) pair to its
+schema, producing plain (schema, question, sql, db_id) records.
 
-    ### Schema:
-    <schema string>
-
-    ### Question:
-    <natural language question>
-
-    ### SQL:
-    <target SQL>   ← appended only during training
-
-The resulting HuggingFace Dataset is returned ready for SFTTrainer.
+This module is deliberately format-agnostic — it does not render a prompt
+or chat template. That's left to the caller, via data/prompt_format.py:
+  - training/train.py builds `messages` for SFTTrainer's conversational /
+    assistant-only-loss training path.
+  - evaluation/evaluate.py and api/main.py build an inference prompt via
+    api/prompt_builder.py.
+Both paths go through the same data/prompt_format.build_messages(), so
+training and inference can't drift apart the way they previously did.
 """
 
 import json
@@ -23,49 +21,6 @@ from typing import Dict, List, Optional
 from datasets import Dataset, DatasetDict
 
 from data.schema_extractor import get_schema, load_spider_tables
-
-
-# ---------------------------------------------------------------------------
-# Prompt template
-# ---------------------------------------------------------------------------
-
-PROMPT_TEMPLATE = """\
-### Schema:
-{schema}
-
-### Question:
-{question}
-
-### SQL:
-{sql}\
-"""
-
-INFERENCE_TEMPLATE = """\
-### Schema:
-{schema}
-
-### Question:
-{question}
-
-### SQL:
-"""
-
-
-def build_prompt(schema: str, question: str, sql: str = "") -> str:
-    """
-    Assemble a training prompt (with SQL) or an inference prompt (without SQL).
-
-    Args:
-        schema:   Schema string, e.g. "concerts(id, theme)\nstadiums(id, name)".
-        question: Natural language question.
-        sql:      Gold SQL answer. Pass empty string for inference.
-
-    Returns:
-        Formatted prompt string.
-    """
-    if sql:
-        return PROMPT_TEMPLATE.format(schema=schema, question=question, sql=sql)
-    return INFERENCE_TEMPLATE.format(schema=schema, question=question)
 
 
 # ---------------------------------------------------------------------------
@@ -84,12 +39,13 @@ def _build_records(
     max_samples: Optional[int] = None,
 ) -> List[Dict]:
     """
-    Convert raw Spider examples into prompt/label dicts.
+    Convert raw Spider examples into (schema, question, sql, db_id) dicts.
 
     Each record has:
-        text  – full training prompt (schema + question + SQL)
-        sql   – gold SQL (for evaluation)
-        db_id – source database identifier
+        sql      – gold SQL (training target / evaluation reference)
+        question – natural language question
+        schema   – resolved schema string
+        db_id    – source database identifier
     """
     records: List[Dict] = []
     if max_samples is not None:
@@ -109,7 +65,6 @@ def _build_records(
 
         records.append(
             {
-                "text": build_prompt(schema, question, sql),
                 "sql": sql,
                 "question": question,
                 "schema": schema,
@@ -117,6 +72,22 @@ def _build_records(
             }
         )
     return records
+
+
+_RECORD_COLUMNS = ("sql", "question", "schema", "db_id")
+
+
+def _records_to_dataset(records: List[Dict]) -> Dataset:
+    """
+    Dataset.from_list() infers columns from the first row, so it can't
+    build a dataset from an empty list without an explicit schema (this is
+    what evaluation.evaluate hits when it asks for 0 training examples).
+    Guard that case explicitly instead of letting it fail deep inside
+    `datasets`.
+    """
+    if not records:
+        return Dataset.from_dict({col: [] for col in _RECORD_COLUMNS})
+    return Dataset.from_list(records)
 
 
 # ---------------------------------------------------------------------------
@@ -173,52 +144,14 @@ def load_spider_dataset(
         max_samples=max_eval_samples,
     )
 
-    print(f"Formatted {len(train_records)} train / {len(eval_records)} eval prompts.")
+    print(f"Formatted {len(train_records)} train / {len(eval_records)} eval examples.")
 
     return DatasetDict(
         {
-            "train": Dataset.from_list(train_records),
-            "validation": Dataset.from_list(eval_records),
+            "train": _records_to_dataset(train_records),
+            "validation": _records_to_dataset(eval_records),
         }
     )
-
-
-def load_from_hub(
-    dataset_name: str = "xlangai/spider",
-    max_train_samples: Optional[int] = None,
-    max_eval_samples: Optional[int] = 500,
-) -> DatasetDict:
-    """
-    Fallback: download Spider from HuggingFace Hub when a local copy is absent.
-    The Hub version does not include .db files so schema is built from the
-    embedded 'db_id', 'query', 'question' fields + a tables.json downloaded
-    alongside the dataset.
-    """
-    from datasets import load_dataset
-
-    raw = load_dataset(dataset_name)
-
-    def _format(example):
-        # Hub version stores db_id but not schema string; leave schema blank
-        # so callers can inject it later via schema_extractor if they have the DBs.
-        schema = example.get("schema", "")
-        return {
-            "text": build_prompt(schema, example["question"], example["query"]),
-            "sql": example["query"],
-            "question": example["question"],
-            "schema": schema,
-            "db_id": example["db_id"],
-        }
-
-    train = raw["train"].map(_format)
-    validation = raw["validation"].map(_format)
-
-    if max_train_samples:
-        train = train.select(range(min(max_train_samples, len(train))))
-    if max_eval_samples:
-        validation = validation.select(range(min(max_eval_samples, len(validation))))
-
-    return DatasetDict({"train": train, "validation": validation})
 
 
 # ---------------------------------------------------------------------------
@@ -239,5 +172,11 @@ if __name__ == "__main__":
         max_train_samples=args.max_train,
         max_eval_samples=args.max_eval,
     )
-    print("\n=== Sample training prompt ===")
-    print(ds["train"][0]["text"])
+    print("\n=== Sample training record ===")
+    print(ds["train"][0])
+    print("\n=== As chat messages (see data/prompt_format.py) ===")
+    from data.prompt_format import build_messages
+
+    example = ds["train"][0]
+    for msg in build_messages(example["schema"], example["question"], example["sql"]):
+        print(f"[{msg['role']}] {msg['content']}")

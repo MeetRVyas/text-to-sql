@@ -23,7 +23,7 @@ class ModelConfig:
     # bnb_4bit_compute_dtype: str = "bfloat16"  # computation dtype for 4-bit layers
     bnb_4bit_use_double_quant: bool = True     # nested quantization for memory savings
 
-    max_seq_length: int = 512
+    max_length: int = 512  # SFTConfig's max_length (renamed from trl's old max_seq_length)
 
 
 @dataclass
@@ -97,7 +97,6 @@ class DataConfig:
     tables_file: str = "tables.json"
     db_dir: str = "data/spider/database"
 
-    dataset_name: Optional[str] = "xlangai/spider"  # HF Hub fallback
     max_train_samples: Optional[int] = None           # None = use full dataset
     max_eval_samples: Optional[int] = 500
 

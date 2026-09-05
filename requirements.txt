@@ -1,24 +1,20 @@
 # Core ML
-torch>=2.1.0
-transformers>=4.40.0
-peft>=0.10.0
-bitsandbytes>=0.43.0
-accelerate>=0.29.0
-datasets>=2.19.0
-trl>=0.8.6
+# Pinned to the versions shipped by the target Kaggle T4 GPU environment
+torch==2.10.0
+transformers==5.0.0
+peft==0.19.1
+bitsandbytes==0.50.1
+accelerate==1.13.0
+datasets==5.0.0
+trl==1.10.0
 
 # API serving
-fastapi>=0.111.0
-uvicorn[standard]>=0.29.0
-pydantic>=2.7.0
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+pydantic==2.12.3
 
 # Data & evaluation
-pandas>=2.2.0
-numpy>=1.26.0
-sqlparse>=0.5.0
-tqdm>=4.66.0
+tqdm==4.67.3
 
 # Utilities
-huggingface-hub>=0.22.0
-scipy>=1.13.0
-scikit-learn>=1.4.0
+huggingface-hub==1.11.0
