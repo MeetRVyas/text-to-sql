@@ -1,0 +1,9 @@
+# Dev/test tooling for the fast unit + API test suite (tests/).
+# Deliberately does NOT pull in torch/transformers/peft/trl/bitsandbytes/accelerate stack
+# so this installs in seconds and CI stays fast.
+# tests/test_training_smoke.py needs that heavier stack and skips itself cleanly when it isn't present
+pytest>=8.0.0
+httpx>=0.27.0   # required by fastapi.testclient.TestClient
+fastapi==0.136.1
+pydantic==2.12.3
+ruff>=0.16.0
