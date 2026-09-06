@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/download_spider.sh
 # --------------------------
-# Downloads the Spider Text-to-SQL dataset and extracts it to data/spider/.
+# Downloads the Spider Text-to-SQL dataset and extracts it to data/spider_data/.
 #
 # Spider is hosted on Yale's servers and requires accepting a usage agreement
 # on https://yale-lily.github.io/spider before downloading.
@@ -11,7 +11,7 @@
 #   bash scripts/download_spider.sh --progress
 #
 # After running this script the layout should be:
-#   data/spider/
+#   data/spider_data/
 #     train_spider.json
 #     dev.json
 #     tables.json
@@ -52,8 +52,8 @@ echo ""
 
 mkdir -p "$DEST_DIR"
 
-if [ -d "$DEST_DIR/spider" ]; then
-    echo "[skip] data/spider already exists. Delete it to re-download."
+if [ -d "$DEST_DIR/spider_data" ]; then
+    echo "[skip] data/spider_data already exists. Delete it to re-download."
     exit 0
 fi
 
@@ -82,10 +82,10 @@ rm "$DEST_DIR/$ZIP_NAME"
 
 echo "[3/3] Verifying layout …"
 required_files=(
-    "$DEST_DIR/spider/train_spider.json"
-    "$DEST_DIR/spider/dev.json"
-    "$DEST_DIR/spider/tables.json"
-    "$DEST_DIR/spider/database"
+    "$DEST_DIR/spider_data/train_spider.json"
+    "$DEST_DIR/spider_data/dev.json"
+    "$DEST_DIR/spider_data/tables.json"
+    "$DEST_DIR/spider_data/database"
 )
 
 all_ok=true
@@ -100,8 +100,8 @@ done
 
 if $all_ok; then
     echo ""
-    echo "Spider dataset ready at data/spider/"
-    db_count=$(find data/spider/database -name "*.db" | wc -l)
+    echo "Spider dataset ready at data/spider_data/"
+    db_count=$(find data/spider_data/database -name "*.db" | wc -l)
     echo "  Found $db_count .db files."
 else
     echo ""
