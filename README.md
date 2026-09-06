@@ -2,9 +2,13 @@
 
 Turns "how many singers are there" into `SELECT COUNT(*) FROM singer`, fine-tuned with QLoRA.
 
+<div align = "center">
+
 ![CI](https://github.com/MeetRVyas/text-to-sql/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Status](https://img.shields.io/badge/status-in%20progress-yellow.svg)
+
+</div>
 
 ## Why this exists
 

@@ -8,6 +8,7 @@
 #
 # Usage:
 #   bash scripts/download_spider.sh
+#   bash scripts/download_spider.sh --progress
 #
 # After running this script the layout should be:
 #   data/spider/
@@ -24,6 +25,21 @@ set -euo pipefail
 SPIDER_URL="https://drive.usercontent.google.com/download?id=1403EGqzIDoHMdQF4c9Bkyl7dZLZ5Wt6J&export=download&confirm=t"
 DEST_DIR="data"
 ZIP_NAME="spider.zip"
+
+DOWNLOAD_PROGRESS=false
+
+case "${1:-}" in
+    "")
+        ;;
+    --progress)
+        DOWNLOAD_PROGRESS=true
+        ;;
+    *)
+        echo "Usage: bash scripts/download_spider.sh [--progress]"
+        exit 1
+        ;;
+esac
+
 
 echo "=================================================="
 echo " Spider Text-to-SQL dataset downloader"
@@ -44,9 +60,17 @@ fi
 echo "[1/3] Downloading Spider …"
 # Use wget with progress bar; fall back to curl
 if command -v wget &>/dev/null; then
-    wget -q --show-progress -O "$DEST_DIR/$ZIP_NAME" "$SPIDER_URL"
+    if $DOWNLOAD_PROGRESS; then
+        wget --show-progress -O "$DEST_DIR/$ZIP_NAME" "$SPIDER_URL"
+    else
+        wget -q -O "$DEST_DIR/$ZIP_NAME" "$SPIDER_URL"
+    fi
 elif command -v curl &>/dev/null; then
-    curl -L --progress-bar -o "$DEST_DIR/$ZIP_NAME" "$SPIDER_URL"
+    if $DOWNLOAD_PROGRESS; then
+        curl -L --progress-bar -o "$DEST_DIR/$ZIP_NAME" "$SPIDER_URL"
+    else
+        curl -sSL -o "$DEST_DIR/$ZIP_NAME" "$SPIDER_URL"
+    fi
 else
     echo "ERROR: neither wget nor curl found. Install one and retry."
     exit 1
